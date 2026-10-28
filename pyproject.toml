@@ -1,6 +1,6 @@
 [project]
 name = "mcp-1c-local-bridge"
-version = "1.0.0"
+version = "1.1.0"
 description = "Локальный MCP-мост к открытому сеансу 1С через внешнюю обработку, без промежуточного шлюза"
 readme = "README.md"
 requires-python = ">=3.11"

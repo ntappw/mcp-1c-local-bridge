@@ -21,7 +21,7 @@ if (-not $V8Path) {
     $V8Path = Join-Path $platform.FullName 'bin\1cv8.exe'
 }
 
-# Конфигуратор читает исходники с локального диска: с UNC-пути WSL пакетный режим работает ненадёжно
+# Конфигуратор читает исходники с локального диска: с сетевого (UNC) пути пакетный режим работает ненадёжно
 # TEMP бывает с короткими именами 8.3 (IVANOV~1.PET), Remove-Item на таком пути падает - берём полный
 $work = Join-Path (Get-Item -LiteralPath $env:TEMP).FullName 'mcp-1c-local-bridge-build'
 if (Test-Path $work) { Remove-Item $work -Recurse -Force }

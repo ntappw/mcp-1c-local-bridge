@@ -13,7 +13,11 @@ EXCHANGE_DIR_NAME = "mcp-1c-local-bridge"
 
 
 def exchange_root() -> Path:
-    """Каталог обмена: %TEMP%\\mcp-1c-local-bridge пользователя Windows (там же его ищет обработка)."""
+    """Каталог обмена: MCP_1C_BRIDGE_DIR или %TEMP%\\mcp-1c-local-bridge пользователя Windows.
+
+    Обработка по умолчанию работает в том же %TEMP%. Если на её форме выбран свой каталог, его задают и здесь
+    переменной MCP_1C_BRIDGE_DIR: сами стороны каталог не согласуют.
+    """
     override = os.environ.get("MCP_1C_BRIDGE_DIR")
     if override:
         return Path(override).expanduser()

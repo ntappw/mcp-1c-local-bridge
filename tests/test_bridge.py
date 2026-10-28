@@ -134,6 +134,22 @@ def test_silent_session_is_not_picked(root):
     assert "не отвечает" in asyncio.run(server.sessions())
 
 
+def test_only_session_folders_are_pruned(root):
+    # Каталог обмена может быть общим (MCP_1C_BRIDGE_DIR): чужие папки в нём не трогаются
+    stale = make_session(root, "cccc0003")
+    orphan = root / "dddd0004"
+    orphan.mkdir()
+    foreign = root / "Документы"
+    (foreign / "Архив").mkdir(parents=True)
+    old = time.time() - 3 * 24 * 3600
+    for path in (stale / "session.json", orphan, foreign):
+        os.utime(path, (old, old))
+    assert exchange.list_sessions(root) == []
+    assert not stale.exists() and not orphan.exists()
+    assert (foreign / "Архив").is_dir()
+    assert "MCP_1C_BRIDGE_DIR" in asyncio.run(server.sessions())
+
+
 def test_busy_session_stays_selectable(root):
     path = make_session(root, state="busy", busyCommand="x")
     old = time.time() - 120

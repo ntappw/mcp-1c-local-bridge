@@ -6,6 +6,7 @@ import asyncio
 import json
 import math
 import os
+import re
 import secrets
 import shutil
 import time
@@ -21,6 +22,9 @@ HEARTBEAT_ALIVE_SEC = 10.0
 # Каталоги сеансов, молчащих дольше суток, остались от упавших клиентов - удаляем
 STALE_PRUNE_SEC = 24 * 3600.0
 CLOCK_PROBE = ".clock"
+# Каталог сеанса обработка называет 8 шестнадцатеричными символами. Каталог обмена может быть общим
+# (MCP_1C_BRIDGE_DIR), поэтому прочие папки в нём не считаются сеансами и не удаляются
+SESSION_NAME = re.compile(r"[0-9a-f]{8}")
 
 
 class BridgeError(Exception):
@@ -68,7 +72,7 @@ def list_sessions(root: Path, prune: bool = True) -> list[Session]:
     now = windows_now(root)
     sessions: list[Session] = []
     for entry in sorted(root.iterdir()):
-        if not entry.is_dir():
+        if not _is_session_dir(entry):
             continue
         info_file = entry / "session.json"
         try:
@@ -111,7 +115,8 @@ def find_session(root: Path, selector: str | None) -> Session:
 
 def describe_sessions(sessions: list[Session], root: Path) -> str:
     if not sessions:
-        return f"Сеансов нет (каталог обмена {root})."
+        return (f"Сеансов нет (каталог обмена {root}). Если на форме обработки выбран другой каталог обмена, "
+                "MCP-серверу нужен тот же: переменная окружения MCP_1C_BRIDGE_DIR.")
     return "\n\n".join(describe_session(s) for s in sessions)
 
 
@@ -246,7 +251,8 @@ def locate_command(root: Path, command_id: str) -> Path | None:
     if not root.is_dir():
         return None
     for entry in root.iterdir():
-        if entry.is_dir() and any((entry / box / f"{command_id}.json").exists() for box in ("in", "work", "out")):
+        if _is_session_dir(entry) and any((entry / box / f"{command_id}.json").exists()
+                                          for box in ("in", "work", "out")):
             return entry
     return None
 
@@ -272,6 +278,10 @@ def _remember_result(command_id: str, response: dict[str, Any]) -> None:
     _results[command_id] = response
     while len(_results) > 100:
         _results.popitem(last=False)
+
+
+def _is_session_dir(path: Path) -> bool:
+    return SESSION_NAME.fullmatch(path.name) is not None and path.is_dir()
 
 
 def _mtime(path: Path, default: float) -> float:
