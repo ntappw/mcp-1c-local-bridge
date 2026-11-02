@@ -206,7 +206,7 @@ def test_metadata_composition_rendering(root):
     assert "Справочники (2): Контрагенты, Доработки_Перевозчики «Перевозчики» [расширение Доработки]" in text
 
 
-def test_manual_mode_awaiting_then_denied(root):
+def test_manual_mode_awaiting_then_denied_with_comment(root):
     path = make_session(root, mode="manual")
 
     def await_decision(command):
@@ -222,6 +222,23 @@ def test_manual_mode_awaiting_then_denied(root):
     assert "ждёт решения пользователя" in asyncio.run(server.result(command_id, wait=0))
     assert "с подтверждением" in asyncio.run(server.sessions())
 
-    denied = {"protocol": 1, "id": command_id, "status": "denied", "error": "не разрешил", "durationMs": 5}
+    denied = {"comment": "Нужен только октябрь,\nбез ФИО", "protocol": 1, "id": command_id, "status": "denied",
+              "error": "не разрешил", "durationMs": 5}
     (path / "out" / f"{command_id}.json").write_text(json.dumps(denied, ensure_ascii=False), encoding="utf-8")
-    assert "Пользователь не разрешил выдачу" in asyncio.run(server.result(command_id, wait=1))
+    later = asyncio.run(server.result(command_id, wait=1))
+    assert "Пользователь не разрешил выдачу" in later
+    assert "Его пояснение с формы моста:\nНужен только октябрь,\nбез ФИО" in later
+
+
+def test_denial_without_comment_and_comment_before_large_result(root):
+    path = make_session(root)
+    rows = [[{"_presentation": f"Контрагент {index}"}, index, "2026-10-21T00:00:00"] for index in range(3000)]
+    answers = iter([{"status": "denied", "error": "не разрешил"},
+                    {"comment": "Суммы в тысячах рублей", "status": "ok", "result": query_table(rows)}])
+    with FakeBridge(path, lambda command: next(answers)):
+        denied = asyncio.run(server.query("ВЫБРАТЬ 1"))
+        approved = asyncio.run(server.query("ВЫБРАТЬ", row_limit=5000))
+    assert "не пояснил почему" in denied and "не повторяй" in denied
+    # Большой вывод уходит в файл, в ответе остаётся начало - комментарий в нём
+    assert "не поместился" in approved
+    assert approved.startswith("Комментарий пользователя с формы моста:\nСуммы в тысячах рублей")

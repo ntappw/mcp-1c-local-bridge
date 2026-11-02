@@ -20,13 +20,20 @@ _OWN_FRAME = re.compile(r"^\{ВнешняяОбработка\.MCPLocalBridge\."
 
 def render_response(response: dict[str, Any], kind: str, output_format: str) -> str:
     status = response.get("status")
+    comment = str(response.get("comment") or "").strip()
     parts: list[str] = []
+    if comment and status != "denied":
+        # Перед результатом: от большого вывода в ответе остаётся только начало (fit)
+        parts.append(f"Комментарий пользователя с формы моста:\n{comment}")
     if status == "ok":
         parts.append(render_result(response.get("result"), kind, output_format))
     elif status == "rejected":
         parts.append(f"Обработка отказалась выполнять команду: {response.get('error', '')}")
+    elif status == "denied" and comment:
+        parts.append(f"Пользователь не разрешил выдачу результата агенту. Его пояснение с формы моста:\n{comment}")
     elif status == "denied":
-        parts.append("Пользователь не разрешил выдачу результата агенту.")
+        parts.append("Пользователь не разрешил выдачу результата агенту и не пояснил почему: тот же запрос "
+                     "не повторяй, спроси пользователя, что не так.")
     elif status == "expired":
         parts.append("Обработка не начала команду в отведённый срок (была занята или приостановлена), "
                      "команда не выполнялась.")
