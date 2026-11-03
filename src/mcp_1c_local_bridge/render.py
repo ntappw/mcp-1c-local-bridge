@@ -8,6 +8,7 @@ import re
 import time
 from typing import Any
 
+from .metaindex import summary as index_summary
 from .paths import results_dir
 
 INLINE_LIMIT = int(os.environ.get("MCP_1C_BRIDGE_INLINE_LIMIT", "20000"))
@@ -49,7 +50,12 @@ def render_response(response: dict[str, Any], kind: str, output_format: str) -> 
     for warning in response.get("warnings") or []:
         parts.append(f"Внимание: {warning}")
     footer = f"[{response.get('durationMs', '?')} мс, команда {response.get('id', '?')}"
-    if response.get("rolledBack"):
+    transaction = response.get("transaction")
+    if transaction == "committed":
+        footer += ", транзакция зафиксирована - изменения сохранены"
+    elif transaction == "none":
+        footer += ", без транзакции моста - записанное кодом сохранено, в том числе до ошибки"
+    elif response.get("rolledBack"):
         footer += ", транзакция откатана - изменения в базе не сохранены"
     parts.append(footer + "]")
     return "\n\n".join(part for part in parts if part)
@@ -70,6 +76,8 @@ def render_result(result: Any, kind: str, output_format: str) -> str:
         return render_query(result)
     if kind == "metadata" and isinstance(result, dict):
         return render_metadata(result)
+    if kind == "index" and isinstance(result, dict):
+        return index_summary(result)
     if is_table(result):
         return render_table(result)
     return to_json(result)

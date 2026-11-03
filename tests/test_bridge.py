@@ -125,6 +125,13 @@ def test_session_selection(root):
     assert exchange.find_session(root, "aaaa0001").sid == "aaaa0001"
 
 
+def test_ordinary_application_in_sessions(root):
+    make_session(root, platform="8.3.24.1691", bridgeVersion="1.3.0", application="ordinary")
+    described = asyncio.run(server.sessions())
+    assert "Платформа: 8.3.24.1691, обработка 1.3.0, обычное приложение" in described
+    assert "агенту сообщения не возвращаются" in described and "без транзакции и отката" in described
+
+
 def test_silent_session_is_not_picked(root):
     path = make_session(root)
     old = time.time() - 120
@@ -173,6 +180,24 @@ def test_error_and_rejection_rendering(root):
     assert "Ошибка 1С: Поле не найдено" in failed
     assert "{(1,8)}" in failed
     assert "- подсказка" in failed
+
+
+def test_write_transaction_request_and_outcome(root):
+    path = make_session(root)
+    outcomes = iter([
+        {"status": "ok", "result": 1, "rolledBack": False, "transaction": "committed"},
+        {"status": "error", "error": "Деление на 0", "rolledBack": True, "transaction": "rolledBack"},
+        {"status": "ok", "result": 1, "rolledBack": False, "transaction": "none"},
+    ])
+    with FakeBridge(path, lambda command: next(outcomes)) as bridge:
+        committed = asyncio.run(server.execute("Результат = 1;", allow_write=True))
+        failed = asyncio.run(server.execute("Результат = 1 / 0;", allow_write=True))
+        plain = asyncio.run(server.eval_expression("1", allow_write=True, transaction=False))
+    # Запись по умолчанию просит транзакцию; transaction=false уходит обработке как есть
+    assert [(c["allowWrite"], c["transaction"]) for c in bridge.commands] == [(True, True), (True, True), (True, False)]
+    assert "транзакция зафиксирована - изменения сохранены" in committed
+    assert "Деление на 0" in failed and "транзакция откатана" in failed
+    assert "без транзакции моста" in plain
 
 
 def test_error_details_drop_bridge_stack():
@@ -242,3 +267,152 @@ def test_denial_without_comment_and_comment_before_large_result(root):
     # Большой вывод уходит в файл, в ответе остаётся начало - комментарий в нём
     assert "не поместился" in approved
     assert approved.startswith("Комментарий пользователя с формы моста:\nСуммы в тысячах рублей")
+
+
+SAMPLE_INDEX = {
+    "format": 1, "fingerprint": "f1", "built": "2026-11-03T10:15:00",
+    "configuration": {"name": "Тест", "version": "1.0"}, "extensions": [], "objects": 11, "fields": 7,
+    "parts": [
+        {"collection": "Справочники", "types": [["Строка(12)"], ["Справочник.Контрагенты"], ["Строка(150)"]],
+         "objects": [
+             {"full": "Справочник.Контрагенты", "name": "Контрагенты",
+              "attributes": [["ИНН", "", 0], ["ГоловнойКонтрагент", "Головной контрагент", 1]],
+              "tables": [{"name": "КонтактнаяИнформация", "attributes": [["Представление", "", 2]]}],
+              "predefined": ["Основной"], "forms": ["ФормаЭлемента"]},
+             {"full": "Справочник.ИнновационныеПроекты", "name": "ИнновационныеПроекты",
+              "synonym": "Инновационные проекты", "attributes": [["Шифр", "", 2]]},
+             {"full": "Справочник.ДоговорыКонтрагентов", "name": "ДоговорыКонтрагентов",
+              "owners": ["Справочник.Контрагенты"]},
+             {"full": "Справочник.Сломанный", "error": "Поле объекта не обнаружено (Владельцы)"}]},
+        {"collection": "Документы",
+         "types": [["Справочник.Контрагенты"], ["Справочник.Контрагенты", "Справочник.ДоговорыКонтрагентов"]],
+         "objects": [{"full": "Документ.Реализация", "name": "Реализация", "synonym": "Реализация товаров",
+                      "attributes": [["Контрагент", "", 0], ["ВладелецФайла", "", 1, "Доработки"]],
+                      "records": ["РегистрНакопления.Взаиморасчеты"]}]},
+        {"collection": "ОпределяемыеТипы", "types": [["Справочник.Контрагенты", "Справочник.ДоговорыКонтрагентов"]],
+         "objects": [{"full": "ОпределяемыйТип.ВладелецФайлов", "name": "ВладелецФайлов", "type": 0}]},
+        {"collection": "РегистрыНакопления", "types": [["Справочник.Контрагенты"], ["Число(15,2)"]],
+         "objects": [{"full": "РегистрНакопления.Взаиморасчеты", "name": "Взаиморасчеты", "registerKind": "Остатки",
+                      "dimensions": [["Контрагент", "", 0]], "resources": [["Сумма", "", 1]]}]},
+        {"collection": "ПодпискиНаСобытия", "types": [["Справочник.Контрагенты"]],
+         "objects": [{"full": "ПодпискаНаСобытие.ПроверкаИНН", "name": "ПроверкаИНН", "source": 0,
+                      "event": "ПередЗаписью", "handler": "КонтрагентыСервер.ПроверитьИНН"}]},
+        {"collection": "ПланыОбмена", "types": [],
+         "objects": [{"full": "ПланОбмена.СБП", "name": "СБП", "exchangeContent": [["Справочник.Контрагенты", True]]}]},
+        {"collection": "Подсистемы", "types": [],
+         "objects": [{"full": "Подсистема.Продажи", "name": "Продажи",
+                      "content": ["Справочник.Контрагенты", "Документ.Реализация"]}]},
+        {"collection": "РегламентныеЗадания", "types": [],
+         "objects": [{"full": "РегламентноеЗадание.ОбновлениеКонтрагентов", "name": "ОбновлениеКонтрагентов",
+                      "method": "КонтрагентыСервер.Обновить", "isPredefined": True, "use": False}]},
+        {"collection": "ОбщиеМодули", "types": [],
+         "objects": [{"full": "ОбщийМодуль.КонтрагентыСервер", "name": "КонтрагентыСервер", "flags": ["Сервер"],
+                      "reuse": "Не использовать"}]},
+    ]}
+
+
+@pytest.fixture(autouse=True)
+def clean_index_cache():
+    # Индекс MCP помнит по идентификатору сеанса, а в тестах он у всех сеансов один
+    for cache in (server._indexes, server._index_commands, server._index_paths):
+        cache.clear()
+
+
+def index_handler(path: Path, index=None):
+    index = index or SAMPLE_INDEX
+
+    def handler(command):
+        if command["type"] != "index":
+            return {"status": "ok", "result": None}
+        # Обработка пишет файлы в UTF-8 с BOM
+        (path / "index.json").write_text(json.dumps(index, ensure_ascii=False), encoding="utf-8-sig")
+        return {"status": "ok", "result": {"file": "index.json", "source": "built", "fingerprint": index["fingerprint"],
+                                           "built": index["built"], "objects": index["objects"],
+                                           "fields": index["fields"]}}
+
+    return handler
+
+
+def test_find_searches_index_from_memory(root):
+    path = make_session(root)
+    with FakeBridge(path, index_handler(path)) as bridge:
+        found = asyncio.run(server.find("инн"))
+        by_owner = asyncio.run(server.find("контрагенты инн"))
+        only_fields = asyncio.run(server.find("ИНН", kind="Реквизиты"))
+        refreshed = asyncio.run(server.find("договор", refresh=True))
+    assert "Индекс метаданных построен заново (построен 2026-11-03 10:15 UTC): объектов 11" in found
+    assert "Не описаны в индексе (1): Справочник.Сломанный" in found
+    assert "Справочник.Контрагенты.Реквизит.ИНН: Строка(12)" in found
+    assert "ПодпискаНаСобытие.ПроверкаИНН (ПередЗаписью -> КонтрагентыСервер.ПроверитьИНН)" in found
+    # Слово из имени владельца сужает поиск, но одно поле не находит: полей «инновационных проектов» нет;
+    # синоним, повторяющий имя, не выводится
+    assert "Справочник.ИнновационныеПроекты" in found.splitlines()
+    assert "ИнновационныеПроекты.Реквизит" not in found
+    assert by_owner.splitlines()[1] == "Справочник.Контрагенты.Реквизит.ИНН: Строка(12)"
+    assert "ПодпискаНаСобытие" not in only_fields
+    assert "Справочник.ДоговорыКонтрагентов" in refreshed
+    # Повторные поиски - по индексу в памяти MCP; refresh - новая команда с флагом
+    assert [(command["type"], command["refresh"]) for command in bridge.commands] == [("index", False), ("index", True)]
+
+
+def test_usages_shows_reverse_links(root):
+    path = make_session(root)
+    with FakeBridge(path, index_handler(path)):
+        links = asyncio.run(server.usages("СправочникСсылка.Контрагенты"))
+        recorders = asyncio.run(server.usages("РегистрНакопления.Взаиморасчеты"))
+        module = asyncio.run(server.usages("ОбщийМодуль.КонтрагентыСервер"))
+        missing = asyncio.run(server.usages("Справочник.Нет"))
+    assert "Связи Справочник.Контрагенты по индексу метаданных:" in links
+    assert "- Документ.Реализация.Реквизит.Контрагент: Справочник.Контрагенты" in links
+    assert "- РегистрНакопления.Взаиморасчеты.Измерение.Контрагент: Справочник.Контрагенты" in links
+    assert "Поля типа ОпределяемыйТип.ВладелецФайлов, куда входит этот тип (1):" in links
+    assert "- Документ.Реализация.Реквизит.ВладелецФайла" in links
+    assert "- ОпределяемыйТип.ВладелецФайлов: Справочник.Контрагенты, Справочник.ДоговорыКонтрагентов" in links
+    assert "- ПодпискаНаСобытие.ПроверкаИНН (ПередЗаписью -> КонтрагентыСервер.ПроверитьИНН)" in links
+    assert "- ПланОбмена.СБП" in links and "- Подсистема.Продажи" in links
+    assert "Подчинённые справочники (1):\n- Справочник.ДоговорыКонтрагентов" in links
+    assert "пишут в этот регистр (1):\n- Документ.Реализация" in recorders
+    assert "вызывающие методы модуля (2):" in module and "- ПодпискаНаСобытие.ПроверкаИНН" in module
+    assert "- РегламентноеЗадание.ОбновлениеКонтрагентов (метод КонтрагентыСервер.Обновить, выключено)" in module
+    assert "такого объекта в индексе нет" in missing
+
+
+def test_long_index_build_is_awaited_not_restarted(root):
+    path = make_session(root)
+    with FakeBridge(path, claim_only=True) as bridge:
+        first = asyncio.run(server.find("инн", timeout=1))
+        command = bridge.commands[0]
+        response = {"protocol": 1, "id": command["id"], "durationMs": 1, **index_handler(path)(command)}
+        (path / "out" / f"{command['id']}.json").write_text(json.dumps(response, ensure_ascii=False),
+                                                           encoding="utf-8")
+        second = asyncio.run(server.find("инн", timeout=5))
+    assert "строится" in first and "заново не начнётся" in first
+    assert len(bridge.commands) == 1
+    assert "Справочник.Контрагенты.Реквизит.ИНН" in second
+
+
+def test_result_loads_index_built_after_timeout(root):
+    path = make_session(root)
+    with FakeBridge(path, claim_only=True) as bridge:
+        asyncio.run(server.usages("Справочник.Контрагенты", timeout=1))
+        command = bridge.commands[0]
+    response = {"protocol": 1, "id": command["id"], "durationMs": 1, **index_handler(path)(command)}
+    (path / "out" / f"{command['id']}.json").write_text(json.dumps(response, ensure_ascii=False), encoding="utf-8")
+    text = asyncio.run(server.result(command["id"], wait=1))
+    assert "Индекс метаданных построен заново" in text and "Индекс загружен" in text
+    with FakeBridge(path) as later:
+        found = asyncio.run(server.find("взаиморасчеты"))
+    assert later.commands == []
+    assert "РегистрНакопления.Взаиморасчеты (Остатки)" in found
+
+
+def test_index_denied_and_progress_in_sessions(root):
+    path = make_session(root, state="busy", busyCommand="x", progress="индекс метаданных: 45%")
+    assert "выполняет команду x, индекс метаданных: 45%" in asyncio.run(server.sessions())
+    info = json.loads((path / "session.json").read_text(encoding="utf-8"))
+    info.update(state="ready", progress="")
+    (path / "session.json").write_text(json.dumps(info, ensure_ascii=False), encoding="utf-8")
+    with FakeBridge(path, lambda command: {"status": "denied", "error": "не разрешил"}):
+        denied = asyncio.run(server.find("инн"))
+    assert "Пользователь не разрешил выдачу" in denied
+    assert server._indexes == {}

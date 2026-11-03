@@ -137,9 +137,14 @@ def describe_session(session: Session) -> str:
         number = f", сеанс {info['sessionNumber']}" if info.get("sessionNumber") else ""
         lines.append(f"  Пользователь: {user}{number}")
     if info.get("platform"):
-        lines.append(f"  Платформа: {info['platform']}, обработка {info.get('bridgeVersion', '?')}")
+        # Обычная форма обработки: толстый клиент обычного приложения, клиентский и серверный код - в одном процессе
+        application = ", обычное приложение" if info.get("application") == "ordinary" else ""
+        lines.append(f"  Платформа: {info['platform']}, обработка {info.get('bridgeVersion', '?')}{application}")
     lines.append("  Разрешено: запись в базу - {}, код на клиенте - {}".format(
         "да" if info.get("allowWrite") else "нет", "да" if info.get("allowClientCode") else "нет"))
+    if info.get("application") == "ordinary":
+        lines.append("  Обычное приложение: Сообщить() выводит текст в окно 1С, агенту сообщения не возвращаются; "
+                     "код side=client выполняется в толстом клиенте с доступом к базе, без транзакции и отката")
     if info.get("mode") == "manual":
         lines.append("  Выдача результатов: с подтверждением пользователя - ответ приходит после его решения")
     return "\n".join(lines)
@@ -149,6 +154,10 @@ def state_text(session: Session) -> str:
     state = session.state
     if state == "busy":
         command = session.info.get("busyCommand") or "?"
+        progress = session.info.get("progress")
+        if progress:
+            # Индекс метаданных строится порциями: сердцебиение идёт, видно, сколько сделано
+            return f"выполняет команду {command}, {progress}"
         return f"выполняет команду {command} (без сердцебиения {session.age:.0f} с)"
     if state == "silent":
         return (f"не отвечает {session.age:.0f} с: форма закрыта без уборки, клиент упал "
