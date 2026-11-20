@@ -1044,7 +1044,7 @@
 	Система = Новый СистемнаяИнформация;
 	Сведения = Новый Структура;
 	Сведения.Вставить("protocol", 1);
-	Сведения.Вставить("bridgeVersion", "1.5.0");
+	Сведения.Вставить("bridgeVersion", "1.5.1");
 	Сведения.Вставить("infobase", СтрокаСоединенияИнформационнойБазы());
 	Сведения.Вставить("user", ИмяПользователя());
 	Сведения.Вставить("userFullName", ПолноеИмяПользователя());
@@ -1350,7 +1350,7 @@
 	Попытка
 		// Не «Окно»: это свойство формы только для чтения, присваивание ему - исключение и полная перерисовка
 		ОкноСтраницы = Элементы.ПанельHTML.Документ.defaultView;
-		ОкноСтраницы.addEntry(ТекстЗаписи(Запись), ЗаписиЖурнала.Количество());
+		ОкноСтраницы.addEntry(ТекстЗаписи(Запись), ЗаписиЖурнала.Количество(), ТекстКоличестваЗаписей());
 		ОбновитьБлокиОкна(ОкноСтраницы);
 		Если ПрокрутитьВНачало Тогда
 			ОкноСтраницы.scrollTo(0, 0);
@@ -1404,7 +1404,7 @@
 Процедура ОчиститьЖурналНаСтранице()
 	
 	Попытка
-		Элементы.ПанельHTML.Документ.defaultView.clearEntries();
+		Элементы.ПанельHTML.Документ.defaultView.clearEntries(ТекстКоличестваЗаписей(), ТекстПустогоЖурнала());
 	Исключение
 		// Страница ещё не загрузилась: рисуем её заново целиком
 		Отрисовать();
@@ -1552,19 +1552,39 @@
 	Части = Новый Массив;
 	Части.Добавить("<div class=""card""><span class=""right"">" + ТекстКнопки("Очистить", "clear") + "</span>");
 	Части.Добавить("<h3>Журнал команд <span class=""muted"">(<span id=""count"">");
-	Части.Добавить(Формат(ЗаписиЖурнала.Количество(), "ЧН=0; ЧГ=0") + "</span>)</span></h3>");
+	Части.Добавить(ТекстКоличестваЗаписей() + "</span>)</span></h3>");
 	Части.Добавить("<div class=""row th""><span class=""c-pad""></span><span class=""c-time"">Время</span>");
 	Части.Добавить("<span class=""c-kind"">Команда</span><span class=""c-text"">Текст</span>");
 	Части.Добавить("<span class=""c-status"">Итог</span><span class=""c-res"">Результат</span>");
 	Части.Добавить("<span class=""c-ms"">мс</span></div>");
 	Части.Добавить(СтрокаПоШаблону("<div id=""empty"" class=""muted empty"" style=""display:%1"">",
 		?(ЗаписиЖурнала.Количество() = 0, "block", "none")));
-	Части.Добавить("Команд пока не было.</div><div id=""entries"">");
+	Части.Добавить(ТекстПустогоЖурнала() + "</div><div id=""entries"">");
 	Для Каждого Запись Из ЗаписиЖурнала Цикл
 		Части.Добавить(ТекстЗаписи(Запись));
 	КонецЦикла;
 	Части.Добавить("</div></div>");
 	Возврат СоединенныеСтроки(Части);
+	
+КонецФункции
+
+&НаКлиенте
+Функция ТекстКоличестваЗаписей()
+	
+	// Журнал хранит последние 50 команд: если выполнено больше, показываем и общее число
+	ТекстКоличества = Формат(ЗаписиЖурнала.Количество(), "ЧН=0; ЧГ=0");
+	Если ВыполненоКоманд > ЗаписиЖурнала.Количество() Тогда
+		ТекстКоличества = ТекстКоличества + " из " + Формат(ВыполненоКоманд, "ЧН=0; ЧГ=0");
+	КонецЕсли;
+	Возврат ТекстКоличества;
+	
+КонецФункции
+
+&НаКлиенте
+Функция ТекстПустогоЖурнала()
+	
+	// Пустой журнал после выполненных команд - это очищенный журнал, а не сеанс без команд
+	Возврат ?(ВыполненоКоманд = 0, "Команд пока не было.", "Журнал очищен.");
 	
 КонецФункции
 
@@ -1737,18 +1757,18 @@
 	|	var note = document.getElementById('note');
 	|	return note ? note.value : '';
 	|}
-	|function setCount(count) {
-	|	document.getElementById('count').innerHTML = count;
+	|function setCount(count, text) {
+	|	document.getElementById('count').innerHTML = text;
 	|	document.getElementById('empty').style.display = count > 0 ? 'none' : 'block';
 	|}
-	|function addEntry(html, count) {
+	|function addEntry(html, count, text) {
 	|	var box = document.getElementById('entries');
 	|	var y = window.pageYOffset;
 	|	var height = document.body.scrollHeight;
 	|	box.insertAdjacentHTML('afterbegin', html);
 	|	if (y > 0) { window.scrollTo(0, y + document.body.scrollHeight - height); }
 	|	while (box.children.length > 50) { box.removeChild(box.lastElementChild); }
-	|	setCount(count);
+	|	setCount(count, text);
 	|}
 	|function updateEntry(id, html) {
 	|	var old = document.getElementById(id);
@@ -1765,9 +1785,10 @@
 	|	return Math.round(window.pageYOffset || 0) + '|' + document.getElementById('entries').children.length +
 	|		'|' + ids.join(',');
 	|}
-	|function clearEntries() {
+	|function clearEntries(text, emptyText) {
 	|	document.getElementById('entries').innerHTML = '';
-	|	setCount(0);
+	|	document.getElementById('empty').innerHTML = emptyText;
+	|	setCount(0, text);
 	|}
 	|function copied(state) {
 	|	var link = document.getElementById('copy');
