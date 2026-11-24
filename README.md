@@ -7,7 +7,10 @@ MCP-сервер и внешняя обработка 1С, через котор
 
 [![Инфостарт](https://infostart.ru/bitrix/templates/sandbox_empty/assets/tpl/abo/img/logo.svg)](https://infostart.ru/1c/articles/2831401/)
 
-Статья о проекте на Инфостарте: https://infostart.ru/1c/articles/2831401/
+Статьи о проекте на Инфостарте:
+
+- как устроен мост, установка и безопасность: https://infostart.ru/1c/articles/2831401/
+- проверка интерфейса через клиент тестирования: https://infostart.ru/1c/articles/2855830/
 
 ## Что умеет
 
