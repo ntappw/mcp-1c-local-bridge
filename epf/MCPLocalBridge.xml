@@ -26,6 +26,7 @@
 		<ChildObjects>
 			<Form>Форма</Form>
 			<Form>ФормаОбычная</Form>
+			<Form>Песочница</Form>
 		</ChildObjects>
 	</ExternalDataProcessor>
 </MetaDataObject>

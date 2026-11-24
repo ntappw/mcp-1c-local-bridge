@@ -50,3 +50,46 @@ def test_bridge_version_matches_package():
     managed = ROOT / "epf" / "MCPLocalBridge" / "Forms" / "Форма" / "Ext" / "Form" / "Module.bsl"
     for module in (managed, pack_ordinary_form.SOURCES / "Module.bsl"):
         assert f'"bridgeVersion", "{version}"' in module.read_text(encoding="utf-8-sig"), module
+
+
+def test_shared_regions_match_managed_form():
+    # Тестирование интерфейса и обмен файлами пишутся в модуле управляемой формы; в обычную их переносит
+    # python3 scripts/sync_ordinary_form.py
+    spec = importlib.util.spec_from_file_location("sync_ordinary_form", ROOT / "scripts" / "sync_ordinary_form.py")
+    sync_ordinary_form = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(sync_ordinary_form)
+    managed = sync_ordinary_form.read_module(sync_ordinary_form.MANAGED)
+    ordinary = sync_ordinary_form.read_module(sync_ordinary_form.ORDINARY)
+    assert sync_ordinary_form.synced(ordinary, managed) == ordinary
+    for name in sync_ordinary_form.SHARED_REGIONS:
+        assert "&На" not in sync_ordinary_form.shared_region(managed, name)
+
+
+def test_modules_keep_bom_crlf_and_indented_blank_lines():
+    # Модули - UTF-8 с BOM и CRLF; пустая строка внутри метода несёт отступ, на уровне модуля - пустая
+    managed = ROOT / "epf" / "MCPLocalBridge" / "Forms" / "Форма" / "Ext" / "Form" / "Module.bsl"
+    module_object = ROOT / "epf" / "MCPLocalBridge" / "Ext" / "ObjectModule.bsl"
+    for path in (managed, pack_ordinary_form.SOURCES / "Module.bsl", module_object):
+        data = path.read_bytes()
+        assert data.startswith(b"\xef\xbb\xbf"), path
+        text = data.decode("utf-8-sig")
+        assert not re.search(r"(?<!\r)\n", text), path
+        inside = False
+        for number, line in enumerate(text.split("\r\n"), 1):
+            if re.match(r"\s*(Функция|Процедура)\s", line):
+                inside = True
+            elif re.match(r"\s*(КонецФункции|КонецПроцедуры)", line):
+                inside = False
+            elif inside:
+                assert line != "", f"{path.name}:{number}"
+            assert len(line.expandtabs(4)) <= 120, f"{path.name}:{number}"
+
+
+def test_ordinary_form_methods_do_not_shadow_object_exports():
+    # В модуле обычной формы экспортные методы модуля объекта видны без ЭтотОбъект: метод формы с тем же именем
+    # не компилируется («Недостаточно фактических параметров»), а ошибку видно только при открытии формы
+    object_module = (ROOT / "epf" / "MCPLocalBridge" / "Ext" / "ObjectModule.bsl").read_text(encoding="utf-8-sig")
+    exports = set(re.findall(r"^(?:Функция|Процедура) (\w+)\([^)]*\) Экспорт", object_module, re.M))
+    module = (pack_ordinary_form.SOURCES / "Module.bsl").read_text(encoding="utf-8-sig")
+    own = set(re.findall(r"^(?:Функция|Процедура) (\w+)\(", module, re.M))
+    assert exports and not exports & own

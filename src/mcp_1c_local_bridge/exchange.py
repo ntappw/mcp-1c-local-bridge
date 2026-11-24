@@ -16,6 +16,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .updates import bridge_version_note
+
 PROTOCOL = 1
 # Обработка пишет session.json раз в 2 с; дольше 10 с тишины - форма не отвечает (закрыта, упала, модальное окно)
 HEARTBEAT_ALIVE_SEC = 10.0
@@ -140,11 +142,22 @@ def describe_session(session: Session) -> str:
         # Обычная форма обработки: толстый клиент обычного приложения, клиентский и серверный код - в одном процессе
         application = ", обычное приложение" if info.get("application") == "ordinary" else ""
         lines.append(f"  Платформа: {info['platform']}, обработка {info.get('bridgeVersion', '?')}{application}")
-    lines.append("  Разрешено: запись в базу - {}, код на клиенте - {}".format(
-        "да" if info.get("allowWrite") else "нет", "да" if info.get("allowClientCode") else "нет"))
+    version_note = bridge_version_note(str(info.get("bridgeVersion") or ""))
+    if version_note:
+        lines.append(f"  Внимание: {version_note}")
+    permissions = "  Разрешено: запись в базу - {}, код на клиенте - {}".format(
+        "да" if info.get("allowWrite") else "нет", "да" if info.get("allowClientCode") else "нет")
+    if "safeMode" in info:
+        # Обработка до версии 1.6.0 безопасный режим не включает и поле не пишет
+        permissions += "; безопасный режим кода - {}".format("да" if info.get("safeMode") else "нет")
+    lines.append(permissions)
     if info.get("application") == "ordinary":
         lines.append("  Обычное приложение: Сообщить() выводит текст в окно 1С, агенту сообщения не возвращаются; "
-                     "код side=client выполняется в толстом клиенте с доступом к базе, без транзакции и отката")
+                     "код side=client выполняется в толстом клиенте с доступом к базе, без транзакции и отката. "
+                     "Безопасного режима в толстом клиенте нет, поэтому eval, execute и выражения _expr в "
+                     "параметрах запроса требуют того же разрешения, что и код на клиенте")
+    if info.get("mode") == "manual":
+        lines.append("  При выдаче с подтверждением код на клиенте, test_* и файлы не выполняются")
     if info.get("mode") == "manual":
         lines.append("  Выдача результатов: с подтверждением пользователя - ответ приходит после его решения")
     return "\n".join(lines)

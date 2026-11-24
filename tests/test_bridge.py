@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 from mcp.server.fastmcp.exceptions import ToolError
 
-from mcp_1c_local_bridge import exchange, server
+from mcp_1c_local_bridge import exchange, server, updates
 from mcp_1c_local_bridge.render import agent_details
 
 
@@ -21,6 +21,8 @@ def root(tmp_path, monkeypatch):
     exchange_dir = tmp_path / "exchange"
     monkeypatch.setenv("MCP_1C_BRIDGE_DIR", str(exchange_dir))
     monkeypatch.setenv("MCP_1C_BRIDGE_RESULTS", str(tmp_path / "results"))
+    # Проверка обновлений ходит в сеть: в тестах инструментов она выключена
+    monkeypatch.setenv("MCP_1C_BRIDGE_UPDATE_CHECK", "0")
     return exchange_dir
 
 
@@ -416,3 +418,258 @@ def test_index_denied_and_progress_in_sessions(root):
         denied = asyncio.run(server.find("инн"))
     assert "Пользователь не разрешил выдачу" in denied
     assert server._indexes == {}
+
+
+def test_index_build_flag_and_refusal_on_big_configuration(root):
+    path = make_session(root)
+    refusal = {"status": "rejected", "error": "Индекс метаданных не построен: в конфигурации 15 342 объектов"}
+    with FakeBridge(path, lambda command: refusal) as bridge:
+        text = asyncio.run(server.find("инн"))
+        asyncio.run(server.find("инн", build=True))
+    assert "Обработка отказалась выполнять команду" in text and "15 342" in text
+    assert [command["build"] for command in bridge.commands] == [False, True]
+    assert server._indexes == {}
+
+
+def test_client_code_with_form_property_names_is_not_sent(root):
+    path = make_session(root)
+    with FakeBridge(path) as bridge:
+        with pytest.raises(ToolError, match="Окно, Элементы"):
+            asyncio.run(server.execute("Окно = 1;\nДля Каждого Элементы Из М Цикл КонецЦикла;", side="client"))
+        # На сервере код выполняется в модуле объекта: там эти имена свободны
+        asyncio.run(server.execute("Окно = 1;"))
+        # Сравнение, строка, комментарий и обращение через ЭтаФорма - не присваивание переменной
+        asyncio.run(server.execute('Если Окно = Неопределено Тогда\n\tА = "; Окно = 1"; // Окно = 2\nКонецЕсли;\n'
+                                   'ЭтаФорма.Заголовок = "Мост";', side="client"))
+    assert len(bridge.commands) == 2
+
+
+def test_form_property_names_depend_on_form_kind(root):
+    # Управляемое приложение: код в служебной форме; обычное - в модуле объекта, со своими переменными модуля
+    assert server.reserved_assignments("ЛимитСтрок = 1; Окно = 2;") == ["Окно"]
+    assert server.reserved_assignments("ЛимитСтрок = 1; Окно = 2;", ordinary=True) == ["ЛимитСтрок"]
+    path = make_session(root, application="ordinary")
+    with FakeBridge(path) as bridge:
+        asyncio.run(server.execute("Окно = 1;", side="client"))
+        with pytest.raises(ToolError, match="ЛимитСтрок"):
+            asyncio.run(server.execute("ЛимитСтрок = 1;", side="client"))
+    assert len(bridge.commands) == 1
+
+
+def test_testing_tools_need_new_data_processor(root):
+    path = make_session(root, bridgeVersion="1.5.1")
+    with FakeBridge(path) as bridge:
+        with pytest.raises(ToolError, match="версии 1.5.1 не умеет «тестирование интерфейса»"):
+            asyncio.run(server.test_snapshot())
+        with pytest.raises(ToolError, match="обмен файлами"):
+            asyncio.run(server.load_file("C:\\x.bin"))
+    assert bridge.commands == []
+
+
+def test_test_connect_and_close(root):
+    path = make_session(root, bridgeVersion="1.6.0")
+    answers = {
+        "connect": {"connection": "launched", "address": "localhost:48000",
+                    "windows": [{"title": "Тест", "main": True, "active": True}]},
+        "close": {"closed": True},
+    }
+    with FakeBridge(path, lambda command: {"status": "ok", "result": answers[command["action"]]}) as bridge:
+        connected = asyncio.run(server.test_connect(timeout=30))
+        closed = asyncio.run(server.test_close())
+    assert "localhost:48000, клиент запущен этим вызовом" in connected
+    assert "«Тест» (основное, активное)" in connected
+    assert closed.startswith("Клиент тестирования закрыт.")
+    command = bridge.commands[0]
+    assert (command["type"], command["port"], command["launch"], command["waitSec"]) == ("test", 48000, True, 20)
+
+
+def test_test_snapshot_renders_form_tree(root):
+    path = make_session(root, bridgeVersion="1.6.0")
+    snapshot = {
+        "windows": [{"title": "Тест", "main": True}, {"title": "Заказ (создание) *", "active": True}],
+        "window": "Заказ (создание) *",
+        "items": [{"t": "form", "name": "Документ.Заказ.Форма.ФормаДокумента", "title": "Заказ (создание)",
+                   "modified": True, "items": [
+                       {"t": "group", "name": "ГруппаШапка", "title": "Шапка", "items": [
+                           {"t": "field", "name": "Организация", "title": "Организация", "kind": "Поле ввода",
+                            "value": "Ромашка ООО"},
+                           {"t": "field", "name": "Комментарий", "title": "Примечание", "value": "",
+                            "readOnly": True}]},
+                       {"t": "button", "name": "ФормаЗаписать", "title": "Записать", "disabled": True},
+                       {"t": "table", "name": "Товары", "title": "Товары", "row": ["Сахар", None, "5"], "items": [
+                           {"t": "field", "name": "ТоварыНоменклатура", "title": "Номенклатура"},
+                           {"t": "group", "name": "ТоварыГруппа", "items": [
+                               {"t": "field", "name": "ТоварыЦена", "title": "Цена"},
+                               {"t": "field", "name": "ТоварыКоличество", "title": "Количество"}]}]}]}],
+        "messages": ["Не заполнен склад"], "clientError": "", "objects": 9, "truncated": True,
+    }
+    with FakeBridge(path, lambda command: {"status": "ok", "result": snapshot}) as bridge:
+        text = asyncio.run(server.test_snapshot(window="Заказ", details=True))
+    assert "Окно «Заказ (создание) *»" in text
+    assert "Форма Документ.Заказ.Форма.ФормаДокумента «Заказ (создание)» [изменена]" in text
+    assert '      Организация (Поле ввода) = "Ромашка ООО"' in text
+    assert 'Комментарий «Примечание» = "" [только просмотр]' in text
+    assert "[кнопка] ФормаЗаписать «Записать» [недоступен]" in text
+    assert 'текущая строка: ТоварыНоменклатура="Сахар"; ТоварыКоличество="5"' in text
+    assert "снимок неполный" in text and "- Не заполнен склад" in text
+    command = bridge.commands[0]
+    assert (command["action"], command["window"], command["details"], command["budgetSec"]) == \
+        ("snapshot", "Заказ", True, 40)
+
+
+def test_test_snapshot_table_rows(root):
+    path = make_session(root, bridgeVersion="1.6.0")
+    snapshot = {"windows": [], "window": "Заказы", "messages": [], "clientError": "", "objects": 0,
+                "table": {"name": "Список", "columns": ["СписокНомер", "СписокДата"], "titles": ["Номер", "Дата"],
+                          "rows": [["1", "01.11.2026"], ["2", None]], "truncated": True,
+                          "note": "Чтение строк сдвинуло текущую строку таблицы."}}
+    with FakeBridge(path, lambda command: {"status": "ok", "result": snapshot}):
+        text = asyncio.run(server.test_snapshot(table="Список", rows=2))
+    assert "Таблица Список: строк прочитано 2 (дальше есть ещё: увеличьте rows)" in text
+    assert "| № | СписокНомер «Номер» | СписокДата «Дата» |" in text
+    assert "| 2 | 2 |  |" in text and "сдвинуло текущую строку" in text
+
+
+def test_test_steps_report(root):
+    path = make_session(root, bridgeVersion="1.6.0")
+    report = {"total": 4, "failed": 1, "earlierMessages": ["Старое сообщение"], "steps": [
+        {"action": "click", "target": "ФормаСоздать", "ok": True, "window": "Заказ (создание)", "ms": 300},
+        {"action": "select", "target": "Организация", "ok": True, "value": "Ромашка ООО",
+         "window": "Заказ (создание)", "ms": 900},
+        {"action": "click", "target": "ФормаЗаписать", "ok": False, "error": "Элемент не найден\nв окне",
+         "window": "1С:Предприятие", "messages": ["Не заполнен склад"],
+         "clientError": "Деление на 0 (Документ.Заказ.МодульОбъекта, строка 15)", "ms": 200}]}
+    steps = [{"action": "click", "target": "ФормаСоздать"},
+             {"action": "select", "target": "Организация", "value": "Ромашка ООО"},
+             {"action": "click", "target": "ФормаЗаписать"},
+             {"action": "close"}]
+    with FakeBridge(path, lambda command: {"status": "ok", "result": report}) as bridge:
+        text = asyncio.run(server.test_steps(steps))
+        raw = asyncio.run(server.test_steps(steps, format="json"))
+    lines = text.splitlines()
+    assert lines[0] == "Шаги: выполнено 3 из 4, с ошибкой 1"
+    assert "- Старое сообщение" in text
+    assert "1. + click ФормаСоздать  -> окно «Заказ (создание)»" in lines
+    assert '2. + select Организация = "Ромашка ООО"' in lines
+    assert "3. ОШИБКА click ФормаЗаписать: Элемент не найден в окне  -> окно «1С:Предприятие»" in lines
+    assert "   сообщение пользователю: Не заполнен склад" in lines
+    assert "   ошибка в клиенте тестирования: Деление на 0 (Документ.Заказ.МодульОбъекта, строка 15)" in lines
+    assert "Шаги 4-4 не выполнялись: прогон остановлен на ошибке." in lines
+    assert json.loads(raw[:raw.rindex("\n\n[")])["failed"] == 1
+    assert bridge.commands[0]["steps"] == steps and bridge.commands[0]["stopOnError"] is True
+    with pytest.raises(ToolError, match="Не переданы шаги"):
+        asyncio.run(server.test_steps([]))
+
+
+def test_file_tools(root, monkeypatch):
+    path = make_session(root, bridgeVersion="1.6.0")
+    monkeypatch.setattr(server, "windows_path", lambda value: value.replace("/mnt/c/", "C:\\").replace("/", "\\"))
+    monkeypatch.setattr(server, "local_path", lambda value: "/mnt/c/" + value[3:].replace("\\", "/"))
+
+    def handler(command):
+        if command["action"] == "save":
+            return {"status": "ok", "messages": ["Проведён"],
+                    "result": {"path": command["path"], "size": 2048, "kind": "spreadsheet",
+                               "valueType": "Табличный документ"}}
+        return {"status": "ok", "result": {"address": "e1cib/tempstorage/abc", "size": 10, "path": command["path"]}}
+
+    with FakeBridge(path, handler) as bridge:
+        saved = asyncio.run(server.save_file("Печать()", path="/mnt/c/Temp/form.pdf", format=".PDF"))
+        loaded = asyncio.run(server.load_file("/mnt/c/Temp/in.xml"))
+    assert "Файл записан: C:\\Temp\\form.pdf (2048 байт, табличный документ)" in saved
+    assert "Путь с этого компьютера: /mnt/c/Temp/form.pdf" in saved and "- Проведён" in saved
+    assert 'ПолучитьИзВременногоХранилища("e1cib/tempstorage/abc")' in loaded
+    save, load = bridge.commands
+    assert (save["type"], save["action"], save["path"], save["format"]) == ("file", "save", "C:\\Temp\\form.pdf", "pdf")
+    assert (load["action"], load["path"]) == ("load", "C:\\Temp\\in.xml")
+
+
+def test_read_only_tools_are_annotated():
+    # Клиент MCP вызывает одновременно только инструменты с readOnlyHint: так идут запросы в разные сеансы
+    tools = {tool.name: tool for tool in asyncio.run(server.mcp.list_tools())}
+    read_only = {name for name, tool in tools.items() if tool.annotations and tool.annotations.readOnlyHint}
+    assert read_only == {"sessions", "ping", "query", "metadata", "find", "usages", "result"}
+
+
+def test_old_data_processor_is_reported_in_sessions(root):
+    from mcp_1c_local_bridge import __version__
+    make_session(root, "aaaa0001", bridgeVersion="1.5.1", platform="8.3.27")
+    make_session(root, "bbbb0002", bridgeVersion=__version__, platform="8.3.27")
+    text = exchange.describe_sessions(exchange.list_sessions(root), root)
+    old, current = text.split("\n\n")
+    assert "обработка моста версии 1.5.1, а MCP-сервер уже версии" in old
+    assert "https://github.com/ntappw/mcp-1c-local-bridge" in old and "папке dist" in old
+    assert "Внимание" not in current
+    assert "Обновите MCP-сервер" in updates.bridge_version_note("99.0.0")
+
+
+def test_update_check_reads_tags_once_a_day(tmp_path, monkeypatch):
+    monkeypatch.setenv("MCP_1C_BRIDGE_RESULTS", str(tmp_path / "cache" / "results"))
+    calls = []
+
+    def fake_git(args, repo):
+        calls.append((args, repo))
+        return "aaa\trefs/tags/v1.5.1\nbbb\trefs/tags/v99.2.0\nccc\trefs/tags/v10.0.0\nddd\trefs/tags/backup\n"
+
+    note = updates.update_note(repo=tmp_path, runner=fake_git)
+    assert note.startswith("Вышла новая версия моста 99.2.0") and "git pull" in note
+    assert updates.REPOSITORY_URL in note
+    assert updates.update_note(repo=tmp_path, runner=fake_git) == note
+    assert len(calls) == 1 and calls[0][0][:2] == ["git", "ls-remote"]
+    # Через сутки - снова в сеть; нет сети - прежний ответ сохраняется
+    later = time.time() + updates.CHECK_INTERVAL_SEC + 60
+
+    def offline(args, repo):
+        raise OSError("нет сети")
+
+    updates.update_note(repo=tmp_path, runner=offline, now=later)
+    deadline = time.time() + 5
+    while updates._running and time.time() < deadline:
+        time.sleep(0.05)
+    assert updates.update_note(repo=tmp_path, runner=offline) == note
+
+
+def test_update_check_is_silent_when_current_or_disabled(tmp_path, monkeypatch):
+    from mcp_1c_local_bridge import __version__
+    monkeypatch.setenv("MCP_1C_BRIDGE_RESULTS", str(tmp_path / "cache" / "results"))
+    assert updates.update_note(repo=tmp_path, runner=lambda args, repo: f"x\trefs/tags/v{__version__}\n") == ""
+    monkeypatch.setenv("MCP_1C_BRIDGE_UPDATE_CHECK", "0")
+    assert updates.update_note(repo=tmp_path, runner=lambda args, repo: "x\trefs/tags/v99.0.0\n") == ""
+
+
+def test_safe_mode_and_manual_mode_in_sessions(root):
+    make_session(root, "aaaa0001", safeMode=True, allowClientCode=False, mode="manual", platform="8.3.27")
+    make_session(root, "bbbb0002", safeMode=False, platform="8.3.27")
+    make_session(root, "cccc0003", platform="8.3.27")
+    safe, unsafe, old = exchange.describe_sessions(exchange.list_sessions(root), root).split("\n\n")
+    assert "код на клиенте - нет; безопасный режим кода - да" in safe
+    assert "При выдаче с подтверждением код на клиенте, test_* и файлы не выполняются" in safe
+    assert "безопасный режим кода - нет" in unsafe
+    assert "безопасный режим" not in old
+
+
+def test_write_ban_bypass_and_safe_mode_errors_are_explained(root):
+    path = make_session(root)
+    violation = {"status": "error", "violation": True, "transaction": "none",
+                 "error": "Код завершил транзакцию моста, хотя запись в базу не разрешена."}
+    with FakeBridge(path, lambda command: violation):
+        text = asyncio.run(server.execute("ЗафиксироватьТранзакцию();"))
+    assert text.startswith("Обход запрета записи: Код завершил транзакцию моста") and "сообщи пользователю" in text
+    blocked = {"status": "error", "error": "Установлен безопасный режим. Выполнение операции запрещено"}
+    with FakeBridge(path, lambda command: blocked):
+        text = asyncio.run(server.eval_expression('Новый COMОбъект("WScript.Shell")'))
+    assert "Ошибка 1С: Установлен безопасный режим" in text and "выключить «Безопасный режим»" in text
+
+
+def test_sandbox_form_is_part_of_data_processor():
+    # Клиентский код агента выполняется в отдельной форме: без неё он бы видел разрешения и журнал моста
+    epf = Path(__file__).resolve().parent.parent / "epf"
+    assert "<Form>Песочница</Form>" in (epf / "MCPLocalBridge.xml").read_text(encoding="utf-8-sig")
+    sandbox = (epf / "MCPLocalBridge" / "Forms" / "Песочница" / "Ext" / "Form" / "Module.bsl").read_text("utf-8-sig")
+    assert "Выполнить(Код);" in sandbox and "НаСервере" not in sandbox
+    bridge = (epf / "MCPLocalBridge" / "Forms" / "Форма" / "Ext" / "Form" / "Module.bsl").read_text("utf-8-sig")
+    # В модуле формы моста код агента не выполняется: Выполнить и Вычислить там - только свои выражения
+    assert "Выполнить(Код)" not in bridge and "Вычислить(Выражение)" not in bridge
+    assert "РазрешитьКодНаКлиенте = Ложь;" in bridge and "БезопасныйРежимКода = Истина;" in bridge
+    # Переключатели без вопросов, но нажатие из скрипта страницы отбрасывается
+    assert "ПоказатьВопрос(" not in bridge and "isTrusted" in bridge and "Функция РасширениеПравДопустимо()" in bridge

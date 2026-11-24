@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -32,6 +33,35 @@ def results_dir() -> Path:
     if override:
         return Path(override).expanduser()
     return Path.home() / ".cache" / EXCHANGE_DIR_NAME / "results"
+
+
+_WINDOWS_PATH = re.compile(r"^(?:[A-Za-z]:[\\/]|\\\\)")
+
+
+def windows_path(path: str) -> str:
+    """Путь, понятный клиенту 1С: путь WSL (/mnt/c/..., /home/...) переводится в путь Windows."""
+    if os.name == "nt" or not path or _WINDOWS_PATH.match(path):
+        return path
+    converted = _interop(["wslpath", "-w", path])
+    if converted:
+        return converted
+    drive = re.match(r"^/mnt/([a-z])(/.*)?$", path)
+    if drive:
+        return f"{drive.group(1).upper()}:" + (drive.group(2) or "/").replace("/", "\\")
+    return path
+
+
+def local_path(path: str) -> str:
+    """Путь к файлу Windows с этого компьютера: под WSL - /mnt/c/..., иначе как есть."""
+    if os.name == "nt" or not path or not _WINDOWS_PATH.match(path):
+        return path
+    converted = _interop(["wslpath", "-u", path])
+    if converted:
+        return converted
+    drive = re.match(r"^([A-Za-z]):[\\/](.*)$", path)
+    if drive and os.path.isdir("/mnt/" + drive.group(1).lower()):
+        return f"/mnt/{drive.group(1).lower()}/" + drive.group(2).replace("\\", "/")
+    return path
 
 
 @lru_cache(maxsize=1)

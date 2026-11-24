@@ -16,7 +16,7 @@ CELL_LIMIT = 300
 SYNONYMS_LIMIT = 300
 RESULT_FILES_TTL_SEC = 7 * 24 * 3600
 _DATE = re.compile(r"^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})$")
-_OWN_FRAME = re.compile(r"^\{ВнешняяОбработка\.MCPLocalBridge\.")
+_OWN_FRAME = re.compile(r"^\{ВнешняяОбработка\.MCPLocalBridge\w*\.")
 
 
 def render_response(response: dict[str, Any], kind: str, output_format: str) -> str:
@@ -40,7 +40,15 @@ def render_response(response: dict[str, Any], kind: str, output_format: str) -> 
                      "команда не выполнялась.")
     else:
         error = str(response.get("error", ""))
-        parts.append(f"Ошибка 1С: {error}")
+        if response.get("violation"):
+            parts.append(f"Обход запрета записи: {error} Не повторяй команду и не продолжай работу с базой: "
+                         "сообщи пользователю, что произошло, - решение за ним.")
+        else:
+            parts.append(f"Ошибка 1С: {error}")
+        if "безопасный режим" in error.casefold():
+            parts.append("Код агента выполняется в безопасном режиме: файлы сервера, интернет, COM, внешние "
+                         "компоненты и привилегированный режим в нём недоступны. Если операция действительно нужна, "
+                         "попроси пользователя выключить «Безопасный режим» на форме моста.")
         details = agent_details(str(response.get("errorDetails") or ""), error)
         if details:
             parts.append(f"Подробно:\n{details}")
@@ -78,6 +86,10 @@ def render_result(result: Any, kind: str, output_format: str) -> str:
         return render_metadata(result)
     if kind == "index" and isinstance(result, dict):
         return index_summary(result)
+    if kind.startswith("test.") and isinstance(result, dict):
+        return render_test(result, kind.partition(".")[2])
+    if kind.startswith("file.") and isinstance(result, dict):
+        return render_file(result, kind.partition(".")[2])
     if is_table(result):
         return render_table(result)
     return to_json(result)
@@ -204,6 +216,161 @@ def _object_title(item: dict[str, Any], with_synonym: bool) -> str:
     if item.get("extension"):
         title += f" [расширение {item['extension']}]"
     return title
+
+
+def render_test(result: dict[str, Any], action: str) -> str:
+    if action == "connect":
+        how = {"already": "уже был подключён", "connected": "подключение к запущенному клиенту",
+               "launched": "клиент запущен этим вызовом"}.get(str(result.get("connection")), "")
+        address = result.get("address") or "?"
+        return (f"Клиент тестирования подключён: {address}" + (f", {how}" if how else "") + ".\n"
+                + _windows_line(result.get("windows") or []))
+    if action == "close":
+        if result.get("closed"):
+            return "Клиент тестирования закрыт."
+        return str(result.get("note") or "Клиент тестирования не закрыт.")
+    if action == "steps":
+        return _render_steps(result)
+    return _render_snapshot(result)
+
+
+def _windows_line(windows: list[dict[str, Any]]) -> str:
+    titles = []
+    for window in windows:
+        marks = [mark for key, mark in (("main", "основное"), ("active", "активное")) if window.get(key)]
+        titles.append(f"«{window.get('title', '')}»" + (f" ({', '.join(marks)})" if marks else ""))
+    return "Окна: " + (", ".join(titles) if titles else "нет")
+
+
+def _render_snapshot(result: dict[str, Any]) -> str:
+    lines = [f"Окно «{result.get('window', '')}»"]
+    table = result.get("table")
+    if isinstance(table, dict):
+        lines.append(_render_test_table(table))
+    else:
+        for node in result.get("items") or []:
+            _append_node(lines, node, 0)
+        if not result.get("items"):
+            lines.append("  (в окне нет форм и элементов)")
+    if result.get("truncated"):
+        lines.append("...снимок неполный: истекло время, отведённое на обход (budget_sec). Сузьте снимок: "
+                     "другое окно, table вместо всей формы, без details и hidden.")
+    messages = result.get("messages") or []
+    if messages:
+        lines.append("Сообщения пользователю в окнах клиента:\n" + "\n".join(f"- {text}" for text in messages))
+    if result.get("clientError"):
+        lines.append(f"Ошибка в клиенте тестирования: {result['clientError']}")
+    lines.append(_windows_line(result.get("windows") or []))
+    return "\n".join(lines)
+
+
+def _append_node(lines: list[str], node: dict[str, Any], level: int) -> None:
+    kind = str(node.get("t", ""))
+    name = str(node.get("name") or "")
+    title = str(node.get("title") or "")
+    indent = "  " * (level + 1)
+    caption = name + (f" «{_one_line(title)}»" if title and title != name else "")
+    if kind == "form":
+        text = f"Форма {caption}".rstrip()
+        marks = [mark for key, mark in (("modified", "изменена"), ("readOnly", "только просмотр")) if node.get(key)]
+    else:
+        label = {"field": "", "button": "[кнопка] ", "decoration": "[надпись] ", "table": "[таблица] ",
+                 "group": "[группа] "}.get(kind, f"[{kind}] ")
+        text = label + (caption or "(без имени)")
+        if kind == "field":
+            if node.get("kind"):
+                text += f" ({node['kind']})"
+            if "value" in node:
+                text += f" = {json.dumps(node['value'], ensure_ascii=False)}"
+        marks = [mark for key, mark in (("hidden", "скрыт"), ("disabled", "недоступен"),
+                                        ("readOnly", "только просмотр")) if node.get(key)]
+    lines.append(indent + text + (f" [{', '.join(marks)}]" if marks else ""))
+    for child in node.get("items") or []:
+        _append_node(lines, child, level + 1)
+    if kind == "table" and isinstance(node.get("row"), list):
+        cells = [f"{column}={json.dumps(value, ensure_ascii=False)}"
+                 for column, value in zip(_table_columns(node), node["row"]) if value not in (None, "")]
+        lines.append(indent + "  текущая строка: " + ("; ".join(cells) if cells else "(пустые ячейки)"))
+
+
+def _table_columns(node: dict[str, Any]) -> list[str]:
+    """Колонки таблицы в порядке обхода: так же обработка складывает ячейки текущей строки."""
+    columns: list[str] = []
+    for child in node.get("items") or []:
+        if child.get("t") == "field" and child.get("name") and not child.get("hidden"):
+            columns.append(str(child["name"]))
+        elif child.get("t") != "table" and not child.get("hidden"):
+            columns.extend(_table_columns(child))
+    return columns
+
+
+def _render_test_table(table: dict[str, Any]) -> str:
+    columns = [str(name) for name in table.get("columns") or []]
+    titles = [str(title) for title in table.get("titles") or []]
+    rows = table.get("rows") or []
+    summary = f"Таблица {table.get('name', '')}: строк прочитано {len(rows)}"
+    if table.get("truncated"):
+        summary += " (дальше есть ещё: увеличьте rows)"
+    lines = [summary]
+    if columns:
+        heads = [name + (f" «{title}»" if title and title != name else "")
+                 for name, title in zip(columns, titles + [""] * len(columns))]
+        lines += ["| № | " + " | ".join(heads) + " |", "|" + " --- |" * (len(columns) + 1)]
+        for number, row in enumerate(rows, 1):
+            lines.append(f"| {number} | " + " | ".join(cell_text("" if value is None else value) for value in row)
+                         + " |")
+    if table.get("note"):
+        lines.append(str(table["note"]))
+    return "\n".join(lines)
+
+
+def _render_steps(result: dict[str, Any]) -> str:
+    steps = result.get("steps") or []
+    total = result.get("total", len(steps))
+    failed = result.get("failed", 0)
+    lines = [f"Шаги: выполнено {len(steps)} из {total}, с ошибкой {failed}"]
+    earlier = result.get("earlierMessages") or []
+    if earlier:
+        lines.append("Сообщения, висевшие в окнах до шагов (панели закрыты):\n"
+                     + "\n".join(f"- {text}" for text in earlier))
+    window = None
+    for number, step in enumerate(steps, 1):
+        text = f"{number}. {'+' if step.get('ok') else 'ОШИБКА'} {step.get('action', '')}"
+        if step.get("target"):
+            text += f" {step['target']}"
+        if "value" in step:
+            text += f" = {json.dumps(step['value'], ensure_ascii=False)}"
+        if step.get("error"):
+            text += f": {_one_line(str(step['error']))}"
+        # Окно показывается, когда оно сменилось: открылась форма, вопрос или сообщение об ошибке
+        if step.get("window") != window:
+            window = step.get("window")
+            text += f"  -> окно «{window}»"
+        lines.append(text)
+        for message in step.get("messages") or []:
+            lines.append(f"   сообщение пользователю: {_one_line(str(message))}")
+        if step.get("clientError"):
+            lines.append(f"   ошибка в клиенте тестирования: {_one_line(str(step['clientError']))}")
+    if len(steps) < total:
+        lines.append(f"Шаги {len(steps) + 1}-{total} не выполнялись: прогон остановлен на ошибке.")
+    return "\n".join(lines)
+
+
+def render_file(result: dict[str, Any], action: str) -> str:
+    size = result.get("size", "?")
+    if action == "load":
+        address = result.get("address", "")
+        return (f"Файл {result.get('path', '')} ({size} байт) помещён во временное хранилище.\n"
+                f"Адрес: {address}\n"
+                f"В серверном коде: ПолучитьИзВременногоХранилища(\"{address}\") - двоичные данные. "
+                "Адрес действует, пока открыта форма моста.")
+    kinds = {"spreadsheet": "табличный документ", "binary": "двоичные данные", "text": "текст"}
+    return (f"Файл записан: {result.get('path', '')} ({size} байт, "
+            f"{kinds.get(str(result.get('kind')), result.get('kind'))})")
+
+
+def _one_line(text: str) -> str:
+    return " ".join(text.split())
 
 
 def is_table(value: Any) -> bool:
